@@ -21,6 +21,6 @@ public class Main {
 
         List<User> all = (List<User>) entityManager.find(User.class, "age > 15");
 
-        all.forEach(e -> System.out.println(e.getUsername()  + "  -  " + e.getRegistration()));
+        all.forEach(e -> System.out.println(e.getUsername()  + " registered on " + e.getRegistration()));
     }
 }
