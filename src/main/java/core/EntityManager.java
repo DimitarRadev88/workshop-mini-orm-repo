@@ -9,10 +9,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.sql.*;
 import java.time.LocalDate;
-import java.time.LocalTime;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
 
 public class EntityManager<E> implements DbContext<E> {
 
@@ -29,11 +26,95 @@ public class EntityManager<E> implements DbContext<E> {
         Object value = primaryKey.get(entity);
 
         if (value == null || (long) value <= 0) {
-            return doInsert(entity, primaryKey);
+            return doInsert(entity);
         }
 
         return doUpdate(entity, primaryKey);
     }
+
+    @Override
+    public void doCreate(Class<E> entityClass) throws SQLException {
+        String tableName = getTableName(entityClass);
+        String query = String.format("""
+                        CREATE TABLE %s (
+                            id INT PRIMARY KEY AUTO_INCREMENT,
+                        %s
+                        );
+                        """,
+                tableName,
+                getAllFieldsAndDataTypes(entityClass));
+
+        PreparedStatement ps = connection.prepareStatement(query);
+
+        ps.execute();
+    }
+
+    @Override
+    public void doAlter(E entity) throws SQLException {
+        String tableName = getTableName(entity.getClass());
+        String query = String.format("""
+                ALTER TABLE %s
+                %s;
+                """,
+                tableName,
+                getAddColumnStringForAllNewFields(entity.getClass()));
+
+        PreparedStatement ps = connection.prepareStatement(query);
+        ps.executeUpdate();
+    }
+
+    @Override
+    public boolean delete(Class<E> entityClass, String where) throws SQLException {
+        String tableName = getTableName(entityClass);
+        String query = String.format("""
+                DELETE FROM %s
+                WHERE %s;
+                """,
+                tableName,
+                where);
+
+        PreparedStatement ps = connection.prepareStatement(query);
+
+        return ps.executeUpdate() > 0;
+    }
+
+    private String getAddColumnStringForAllNewFields(Class<?> entityClass) throws SQLException {
+        StringBuilder sb = new StringBuilder();
+        Set<String> fields = getAllFieldsFromTable(entityClass);
+
+        Arrays.stream(entityClass.getDeclaredFields())
+                .filter(f -> f.isAnnotationPresent(Column.class))
+                .forEach(f -> {
+                    String fieldName = f.getAnnotation(Column.class).name();
+                    if (!fields.contains(fieldName)) {
+                        sb.append("ADD COLUMN ").append(getNameAndDataTypeOfField(f).substring(4));
+                    }
+                });
+
+        return sb.substring(0, sb.length() - 2);
+    }
+
+    private Set<String> getAllFieldsFromTable(Class<?> entityClass) throws SQLException {
+        Set<String> allFields = new HashSet<>();
+        String query = String.format("""
+                        SELECT `COLUMN_NAME` FROM `INFORMATION_SCHEMA`.`COLUMNS`
+                        WHERE TABLE_SCHEMA = 'test'
+                        AND `COLUMN_NAME` != 'id'
+                        AND `TABLE_NAME` = '%s';
+                        """,
+                getTableName(entityClass));
+
+        PreparedStatement ps = connection.prepareStatement(query);
+
+        ResultSet rs = ps.executeQuery();
+
+        while (rs.next()) {
+            allFields.add(rs.getString(1));
+        }
+
+        return allFields;
+    }
+
 
     @Override
     public Iterable<E> find(Class<E> entityClass) throws SQLException, InvocationTargetException, NoSuchMethodException, IllegalAccessException, InstantiationException {
@@ -41,22 +122,20 @@ public class EntityManager<E> implements DbContext<E> {
     }
 
     @Override
-    public Iterable<E> find(Class<E> entityClass, String condition) throws SQLException, NoSuchMethodException, IllegalAccessException, InvocationTargetException, InstantiationException {
+    public Iterable<E> find(Class<E> entityClass, String criteria) throws SQLException, NoSuchMethodException, IllegalAccessException, InvocationTargetException, InstantiationException {
         String tableName = getTableName(entityClass);
-        String where = condition != null ? "WHERE " + condition : "";
+        String where = criteria != null ? "WHERE " + criteria : "";
 
         String query = String.format("""
-                SELECT * FROM %s
-                %s
-                """,
+                        SELECT * FROM %s
+                        %s
+                        """,
                 tableName,
                 where
         );
 
         Statement statement = connection.createStatement();
         ResultSet rs = statement.executeQuery(query);
-
-
 
         List<E> entities = new ArrayList<>();
 
@@ -75,18 +154,18 @@ public class EntityManager<E> implements DbContext<E> {
     }
 
     @Override
-    public E findFirst(Class<E> entityClass, String condition) throws SQLException, NoSuchMethodException, InvocationTargetException, InstantiationException, IllegalAccessException {
+    public E findFirst(Class<E> entityClass, String criteria) throws SQLException, NoSuchMethodException, InvocationTargetException, InstantiationException, IllegalAccessException {
         String tableName = getTableName(entityClass);
-        String where = condition != null ? "WHERE " + condition : "";
+        String where = criteria != null ? "WHERE " + criteria : "";
 
         String query = String.format("""
-                SELECT * FROM %s
-                %s
-                LIMIT 1
-                """,
+                        SELECT * FROM %s
+                        %s
+                        LIMIT 1;
+                        """,
                 tableName,
                 where
-                );
+        );
 
         Statement statement = connection.createStatement();
         ResultSet rs = statement.executeQuery(query);
@@ -97,6 +176,40 @@ public class EntityManager<E> implements DbContext<E> {
         fillEntity(entityClass, entity, rs);
 
         return entity;
+    }
+
+    private String getAllFieldsAndDataTypes(Class<E> entityClass) {
+        StringBuilder sb = new StringBuilder();
+
+        Arrays.stream(entityClass.getDeclaredFields()).filter(f -> f.isAnnotationPresent(Column.class))
+                .forEach(f -> sb.append(getNameAndDataTypeOfField(f)));
+
+        return sb.substring(0, sb.length() - 2);
+    }
+
+    private String getNameAndDataTypeOfField(Field field) {
+        field.setAccessible(true);
+        return "    " + transformFieldNameToColumnName(field) + " " + transformFieldTypeToDataType(field) + ",\n";
+    }
+
+    private static String transformFieldTypeToDataType(Field field) {
+        Class<?> fieldType = field.getType();
+        if (fieldType == String.class) {
+            return "VARCHAR(255)";
+        } else if (fieldType == int.class || fieldType == Integer.class) {
+            return "INT";
+        } else if (fieldType == long.class || fieldType == Long.class) {
+            return "BIGINT";
+        } else if (fieldType == LocalDate.class) {
+            return "DATE";
+        }
+
+        throw new IllegalArgumentException("Data type transform not implemented for field of type " + fieldType);
+    }
+
+
+    private static String transformFieldNameToColumnName(Field field) {
+        return field.getAnnotation(Column.class).name();
     }
 
     private void fillEntity(Class<E> entityClass, E entity, ResultSet resultSet) throws SQLException, IllegalAccessException {
@@ -117,14 +230,14 @@ public class EntityManager<E> implements DbContext<E> {
         }
     }
 
-    private boolean doInsert(E entity, Field primaryKey) throws SQLException, IllegalAccessException {
+    private boolean doInsert(E entity) throws SQLException, IllegalAccessException {
         String tableName = getTableName(entity.getClass());
         String[] columnNames = getColumnNames(entity);
         String[] columnValues = getColumnValues(entity);
 
         String query = String.format("""
                         INSERT INTO %s (%s)
-                        VALUES(%s)
+                        VALUES(%s);
                         """,
                 tableName,
                 String.join(", ", columnNames),
@@ -148,7 +261,7 @@ public class EntityManager<E> implements DbContext<E> {
         String query = String.format("""
                         UPDATE %s
                         SET %s
-                        WHERE id = %s
+                        WHERE id = %s;
                         """,
                 tableName,
                 String.join(", ", Arrays.stream(columnNames).map(c -> c + " = ?").toArray(String[]::new)),
